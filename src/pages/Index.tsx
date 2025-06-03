@@ -1,11 +1,18 @@
-// Update this page (the content is just a fallback if you fail to update the page)
+
+import { ChatInterface } from "@/components/ChatInterface";
+import { PropertyList } from "@/components/PropertyList";
 
 const Index = () => {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100">
-      <div className="text-center">
-        <h1 className="text-4xl font-bold mb-4">Welcome to Your Blank App</h1>
-        <p className="text-xl text-gray-600">Start building your amazing project here!</p>
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex">
+      {/* Chat Interface - Left Side */}
+      <div className="w-1/2 border-r border-gray-200 bg-white shadow-lg">
+        <ChatInterface />
+      </div>
+      
+      {/* Property List - Right Side */}
+      <div className="w-1/2 bg-gray-50">
+        <PropertyList />
       </div>
     </div>
   );
