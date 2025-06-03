@@ -1,19 +1,12 @@
-
 import { ChatInterface } from "@/components/ChatInterface";
-import { PropertyList } from "@/components/PropertyList";
+// PropertyList is now rendered *inside* ChatInterface, so we don't import or render it here directly.
 
 const Index = () => {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex">
-      {/* Chat Interface - Left Side */}
-      <div className="w-1/2 border-r border-gray-200 bg-white shadow-lg">
-        <ChatInterface />
-      </div>
-      
-      {/* Property List - Right Side */}
-      <div className="w-1/2 bg-gray-50">
-        <PropertyList />
-      </div>
+    // This div should ensure ChatInterface can take full height.
+    // ChatInterface itself will handle the two-column layout (chat panel + property list panel).
+    <div className="h-screen w-screen overflow-hidden"> 
+      <ChatInterface />
     </div>
   );
 };
