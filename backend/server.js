@@ -90,20 +90,19 @@ app.post('/api/ai/chat', async (req, res) => {
 
 // Helper function to manage a single tool call via Apify MCP Server using SSE
 async function callApifyMCPTool(toolName, toolInput, apiToken) {
-  // UPDATED: Use your specific MCP Server Task URL (base path)
+  // REVERTED: Use your specific MCP Server Task URL (base path)
   const MCP_SERVER_URL = 'https://lucastirbat--property-search-mcp-server.apify.actor'; 
   const jsonRpcId = `chatprop-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
   console.log(`📞 Calling MCP tool: ${toolName} via YOUR dedicated MCP Server Task (${MCP_SERVER_URL}) with ID: ${jsonRpcId}`);
-  // console.log(`Tool Input: ${JSON.stringify(toolInput, null, 2)}`); // Can be verbose
 
   if (!apiToken) {
     console.error('❌ API token is missing for MCP call.');
-    return reject(new Error('Apify API token is required for MCP communication.'));
+    return Promise.reject(new Error('Apify API token is required for MCP communication.'));
   }
 
   return new Promise((resolve, reject) => {
-    // Construct SSE and Message URLs with the provided apiToken
+    // Construct SSE URL with the provided apiToken in the query
     const sseUrl = `${MCP_SERVER_URL}/sse?token=${apiToken}`;
     let eventSource;
     let timeoutId;
@@ -120,10 +119,11 @@ async function callApifyMCPTool(toolName, toolInput, apiToken) {
       console.error(`⏱️ Timeout for MCP tool call ${jsonRpcId} (${toolName})`);
       cleanup();
       reject(new Error(`Timeout waiting for MCP tool ${toolName} to respond`));
-    }, 180000); // 3 minutes timeout
+    }, 600000); // 10 minutes timeout
 
     try {
       console.log(`🔌 Attempting to connect to SSE: ${sseUrl.replace(apiToken, '<APIFY_TOKEN_HIDDEN>')}`);
+      // Initialize EventSource without custom headers (token is in URL)
       eventSource = new EventSource(sseUrl);
     } catch (e) {
       console.error(`❌ SSE Connection Error (initial): ${e.message}`);
@@ -136,12 +136,13 @@ async function callApifyMCPTool(toolName, toolInput, apiToken) {
     };
 
     eventSource.onerror = (error) => {
-      console.error(`❌ SSE Error for ${jsonRpcId} (${toolName}):`, error.message || error);
+      console.error(`❌ SSE Error for ${jsonRpcId} (${toolName}):`, error);
       if (eventSource.readyState === EventSource.CONNECTING) {
         console.error(`SSE failed to connect. Ensure MCP server URL (${MCP_SERVER_URL}) is correct, accessible, and the token is valid.`);
       }
       cleanup();
-      reject(new Error(`SSE error with MCP tool ${toolName}: ${error.message || 'Unknown SSE error'}`));
+      const errorMessage = error && typeof error === 'object' && error.message ? error.message : (error ? JSON.stringify(error) : 'Unknown SSE error');
+      reject(new Error(`SSE error with MCP tool ${toolName}: ${errorMessage}`));
     };
 
     eventSource.addEventListener('endpoint', async (event) => {
@@ -149,15 +150,16 @@ async function callApifyMCPTool(toolName, toolInput, apiToken) {
         const endpointData = event.data;
         console.log(`🔗 Received endpoint for ${jsonRpcId}: ${endpointData}`);
         
-        if (!endpointData || !endpointData.includes('sessionId=')) {
-          throw new Error('Invalid endpoint data received from MCP server.');
+        // Original validation for custom MCP server endpoint data
+        if (!endpointData || !endpointData.includes('sessionId=')) { 
+          throw new Error(`Invalid endpoint data received from MCP server: ${endpointData}`);
         }
         const sessionId = endpointData.split('sessionId=')[1];
         if (!sessionId) {
           throw new Error('Could not extract sessionId from endpoint data.');
         }
 
-        // Construct message URL with the apiToken
+        // Construct message URL with the apiToken and sessionId in the query for custom MCP server
         const messageUrl = `${MCP_SERVER_URL}/message?token=${apiToken}&session_id=${sessionId}`;
         const payload = {
           jsonrpc: '2.0',
@@ -169,7 +171,10 @@ async function callApifyMCPTool(toolName, toolInput, apiToken) {
         console.log(`📤 Sending tool_call to ${messageUrl.replace(apiToken, '<APIFY_TOKEN_HIDDEN>')} for ${jsonRpcId}`);
         const postResponse = await fetch(messageUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json'
+            // No Authorization header needed here, token is in URL for custom MCP server
+          },
           body: JSON.stringify(payload),
         });
 
@@ -179,7 +184,7 @@ async function callApifyMCPTool(toolName, toolInput, apiToken) {
           throw new Error(`MCP tool_call POST failed: ${postResponse.status} - ${errorText}`);
         }
         const responseText = await postResponse.text();
-        console.log(`👍 MCP tool_call POST successful for ${jsonRpcId} (${toolName}): ${responseText}`); // Usually "Accepted" or similar
+        console.log(`👍 MCP tool_call POST successful for ${jsonRpcId} (${toolName}): ${responseText}`); 
 
       } catch (e) {
         console.error(`❌ Error during 'endpoint' event handling or POSTing for ${jsonRpcId}: ${e.message}`);
@@ -190,23 +195,88 @@ async function callApifyMCPTool(toolName, toolInput, apiToken) {
 
     eventSource.addEventListener('message', (event) => {
       try {
-        // console.log(`📩 SSE Message received for ${jsonRpcId} (${toolName}): ${event.data.substring(0, 200)}...`); // Can be very verbose
+        console.log(`📩 SSE Message received for ${jsonRpcId} (${toolName}): ${event.data.substring(0, 300)}...`);
         const messageData = JSON.parse(event.data);
 
-        if (messageData.id === jsonRpcId && messageData.result) {
-          console.log(`🎉 Result received for ${jsonRpcId} (${toolName})!`);
-          cleanup();
-          resolve(messageData.result); 
-        } else if (messageData.id === jsonRpcId && messageData.error) {
-          console.error(`❌ Error result from MCP tool for ${jsonRpcId} (${toolName}):`, messageData.error);
-          cleanup();
-          reject(new Error(`MCP tool ${toolName} returned error: ${messageData.error.message || JSON.stringify(messageData.error)}`));
+        let extractedRunId = null;
+        let extractedDatasetId = null;
+
+        if (messageData.id === jsonRpcId) {
+          if (messageData.error) {
+            console.error(`❌ Error result from MCP tool for ${jsonRpcId} (${toolName}):`, messageData.error);
+            cleanup();
+            reject(new Error(`MCP tool ${toolName} returned error: ${messageData.error.message || JSON.stringify(messageData.error)}`));
+            return;
+          }
+
+          if (messageData.result) {
+            console.log(`Received result object for ${jsonRpcId}, attempting to extract IDs.`);
+            // Look for IDs in the main result object
+            if (messageData.result.runId) extractedRunId = messageData.result.runId;
+            if (messageData.result.actorRunId) extractedRunId = messageData.result.actorRunId; // Alternative key
+            if (messageData.result.datasetId) extractedDatasetId = messageData.result.datasetId;
+            if (messageData.result.defaultDatasetId) extractedDatasetId = messageData.result.defaultDatasetId; // Alternative key
+
+            // Check inside result.content[0].text if it exists (common pattern for nested JSON)
+            if (messageData.result.content && Array.isArray(messageData.result.content) && messageData.result.content.length > 0) {
+              const firstContent = messageData.result.content[0];
+              if (firstContent.type === 'text' && firstContent.text) {
+                console.log(`Attempting to parse result.content[0].text for IDs for ${jsonRpcId}`);
+                let jsonToParse = firstContent.text;
+                const runInfoPrefix = "Actor finished with run information: ";
+                if (firstContent.text.startsWith(runInfoPrefix)) {
+                  const jsonStartIndex = firstContent.text.indexOf('{');
+                  if (jsonStartIndex !== -1) {
+                    jsonToParse = firstContent.text.substring(jsonStartIndex);
+                    console.log(`Extracted JSON string from prefix: ${jsonToParse.substring(0,100)}...`);
+                  } else {
+                    console.warn(`Prefix "${runInfoPrefix}" found but no '{' followed. Treating as non-JSON text.`);
+                    jsonToParse = null; // Cannot parse
+                  }
+                }
+
+                if (jsonToParse) {
+                  try {
+                    const innerResult = JSON.parse(jsonToParse);
+                    // For actor run information, the runId is usually 'id' and datasetId is 'defaultDatasetId'
+                    if (innerResult.id) extractedRunId = extractedRunId || innerResult.id;
+                    if (innerResult.defaultDatasetId) extractedDatasetId = extractedDatasetId || innerResult.defaultDatasetId;
+                    
+                    // Also check for other common ID keys, just in case
+                    if (innerResult.runId) extractedRunId = extractedRunId || innerResult.runId;
+                    if (innerResult.actorRunId) extractedRunId = extractedRunId || innerResult.actorRunId;
+                    if (innerResult.datasetId) extractedDatasetId = extractedDatasetId || innerResult.datasetId;
+
+                    if (Array.isArray(innerResult)) {
+                      console.warn(`Inner result for ${jsonRpcId} is an array. ID extraction from run info might fail if not structured as expected.`);
+                    }
+                  } catch (e) {
+                    console.warn(`Could not parse extracted/direct JSON from result.content[0].text for ${jsonRpcId}: ${e.message}. Original text: ${firstContent.text.substring(0,200)}`);
+                  }
+                }
+              }
+            }
+            
+            if (extractedRunId || extractedDatasetId) {
+              console.log(`🎉 Extracted IDs for ${jsonRpcId} (${toolName}) - Run ID: ${extractedRunId}, Dataset ID: ${extractedDatasetId}`);
+              cleanup(); // We got what we needed (IDs), so clean up SSE
+              resolve({ runId: extractedRunId, datasetId: extractedDatasetId });
+              return;
+            } else {
+              // If we received a result for our ID, but no specific IDs, this is an error from MCP.
+              console.error(`❌ MCP tool ${toolName} (ID: ${jsonRpcId}) sent a result but required IDs (runId/datasetId) were not found. This is an issue with the MCP server response.`);
+              console.error(`Full result from MCP for ${jsonRpcId}:`, JSON.stringify(messageData.result, null, 2).substring(0, 1000));
+              cleanup();
+              reject(new Error(`MCP tool ${toolName} (ID: ${jsonRpcId}) provided a result missing pollable runId/datasetId.`));
+              return;
+            }
+          }
         } else {
-          // console.log(`Ignoring message for other ID or type: ${messageData.id}`);
+          console.log(`Ignoring SSE message for a different ID or type: ${messageData.id}`);
         }
       } catch (e) {
         console.error(`❌ Error parsing SSE message for ${jsonRpcId} (${toolName}): ${e.message}. Data: ${event.data.substring(0,200)}...`);
-        // Don't reject here, could be other messages on the stream. Only reject on error for *our* ID.
+        // Don't reject here, could be other messages on the stream for other IDs. Only if error for *our* ID.
       }
     });
   });
@@ -219,130 +289,353 @@ function normalizeAndStructureDatasetItems(datasetItems, sourceToolName) {
 
   if (!Array.isArray(datasetItems)) {
     console.warn(`Expected an array of dataset items for ${sourceToolName}, but received:`, typeof datasetItems);
+    console.warn('Dataset items (first 500 chars if not array):', String(datasetItems).substring(0,500));
     return [];
   }
 
   if (datasetItems.length > 0) {
-    console.log("Inspecting first raw item from dataset (normalizeAndStructureDatasetItems):", JSON.stringify(datasetItems[0], null, 2));
+    if (sourceToolName.toLowerCase().includes('zillow') || sourceToolName.toLowerCase().includes('apartments-scraper') || sourceToolName.toLowerCase().includes('realtor-scraper')) {
+      console.log(`Inspecting first raw item from ${sourceToolName}:`, JSON.stringify(datasetItems[0], null, 2).substring(0, 1000) + '...');
+    }
   }
 
   datasetItems.forEach(item => {
     let imageUrls = [];
+    let bedrooms = 0;
+    let bathrooms = 0;
+    let propertyType = 'N/A';
+    let description = item.description || item.text || ''; // General default
+    let price = 'N/A';
+    let priceNumeric = 0;
+    let location = 'N/A';
+    let city = 'N/A';
+    let state = 'N/A';
+    let address = 'N/A';
+    let zipCode = '';
+    let area = 'N/A';
+    let areaNumeric = 0;
+    let url = item.url || '#';
+    let amenities = [];
+    let features = [];
+    let coordinates = undefined;
+    let title = 'N/A'; // General default
+    let homeStatus = item.homeStatus || item.HomeStatus || item.status || 'N/A';
+    let scrapedAt = item.scrapedAt || item.datetime || new Date().toISOString();
 
-    // Attempt 1: item.photos (array of strings or objects)
-    if (Array.isArray(item.photos) && item.photos.length > 0) {
-      console.log(`Item ${item.zpid || item.id}: Found item.photos array.`);
-      imageUrls = item.photos.map(p => {
-        if (typeof p === 'string') return p;
-        if (p && typeof p === 'object') {
-          return p.url || p.href || p.desktop || p.high || p.medium || p.thumb;
+    // Scraper-specific normalization
+    if (sourceToolName && sourceToolName.toLowerCase().includes('apartments-scraper')) {
+      title = item.propertyName || 'N/A';
+      if (item.rent) {
+        if (item.rent.min && item.rent.max && item.rent.min !== item.rent.max) {
+          price = `$${item.rent.min} - $${item.rent.max}`;
+        } else if (item.rent.min) {
+          price = `$${item.rent.min}`;
+        } else if (item.rent.max) {
+          price = `$${item.rent.max}`;
         }
-        return null;
-      }).filter(url => url);
-    } 
-    // Attempt 2: item.media.photo (object with different sizes) - Based on Zillow output
-    else if (item.media && item.media.photo && typeof item.media.photo === 'object') {
-      console.log(`Item ${item.zpid || item.id}: Found item.media.photo object.`);
-      const photoData = item.media.photo;
-      const potentialUrls = [
-        photoData.high, // Prioritize high-resolution
-        photoData.desktop,
-        photoData.medium,
-        photoData.thumb
-        // Add any other variants if they exist, e.g., photoData.original
-      ];
-      potentialUrls.forEach(url => {
-        if (url && typeof url === 'string') {
-          imageUrls.push(url);
+        priceNumeric = parseFloat(item.rent.min || item.rent.max || 0);
+      }
+      if (item.location) {
+        address = item.location.streedAddress || 'N/A';
+        city = item.location.city || 'N/A';
+        state = item.location.state || 'N/A';
+        zipCode = item.location.postalCode || '';
+        location = item.location.fullAddress || `${address}, ${city}, ${state}`.replace(/^, |, $/g, '').replace(/^,|, $/g, '');
+        if (location === ', , ') location = 'N/A';
+      }
+      if (item.beds) {
+        const bedString = String(item.beds).toLowerCase();
+        if (bedString.includes('studio')) bedrooms = 0;
+        else {
+          const match = bedString.match(/(\d+)/);
+          if (match) bedrooms = parseInt(match[1]);
         }
-      });
-    }
-    // Attempt 3: item.imgSrc (single string URL)
-    else if (typeof item.imgSrc === 'string') {
-      console.log(`Item ${item.zpid || item.id}: Found item.imgSrc string.`);
-      imageUrls.push(item.imgSrc);
-    }
-    // Attempt 4: item.image (single string URL)
-    else if (item.image && typeof item.image === 'string') {
-      console.log(`Item ${item.zpid || item.id}: Found item.image string.`);
-      imageUrls.push(item.image);
-    }
-    // Attempt 5: item.Media (array of objects with a .url property)
-    else if (Array.isArray(item.Media) && item.Media.length > 0) {
-      console.log(`Item ${item.zpid || item.id}: Found item.Media array.`);
-      imageUrls = item.Media.map(m => m.url).filter(url => url);
-    }
-    // Attempt 6: item.hdpData.homeInfo.photos (Zillow specific deep structure)
-    else if (item.zpid && item.hdpData?.homeInfo?.photos) {
-      console.log(`Item ${item.zpid || item.id}: Found item.hdpData.homeInfo.photos.`);
-      const hdpPhotos = item.hdpData.homeInfo.photos;
-      if (Array.isArray(hdpPhotos)) {
-        imageUrls = hdpPhotos.flatMap(p => { // Use flatMap to handle nested arrays of URLs
-          if (p.mixedSources && p.mixedSources.jpeg && Array.isArray(p.mixedSources.jpeg)) {
-            return p.mixedSources.jpeg.map(jpegInfo => jpegInfo.url); // Collect all jpeg URLs
+      }
+      if (item.baths) {
+        const bathString = String(item.baths).toLowerCase();
+        const match = bathString.match(/(\d*\.?\d+)/);
+        if (match) bathrooms = parseFloat(match[1]);
+      }
+      area = item.sqft || 'N/A';
+      if (item.sqft && typeof item.sqft === 'string') {
+        areaNumeric = parseFloat(item.sqft.replace(/[^0-9.-]+/g, '').split('-')[0].trim()) || 0;
+      }
+      if (Array.isArray(item.photos)) {
+        imageUrls = item.photos.filter(p => typeof p === 'string' && p.startsWith('http'));
+      }
+      description = item.description || '';
+      url = item.url || '#';
+      if(item.coordinates) coordinates = { lat: item.coordinates.latitude, lng: item.coordinates.longitude };
+      propertyType = 'apartment'; // Default for apartments.com
+      if (Array.isArray(item.amenities)) {
+        item.amenities.forEach(group => {
+          if (group && Array.isArray(group.value)) {
+            amenities = amenities.concat(group.value);
           }
-          return []; // Return empty array if structure is not as expected
-        }).filter(url => url);
+        });
+      }
+      scrapedAt = item.scrapedAt || new Date().toISOString();
+      // After processing, push the single normalized property and prevent fall-through
+      // (This block already creates one property from one item, so the existing structure is okay, 
+      // but we need to ensure it doesn't fall through if we consider it fully handled)
+      // For consistency with other blocks that might return early, we can consider adding a mechanism
+      // or ensure the default block is truly a catch-all for *unhandled* items.
+      // However, the immediate issue is with apartmentlist-scraper creating multiple properties and then its parent item being re-processed.
+
+    } else if (sourceToolName && sourceToolName.toLowerCase().includes('realtor-scraper')) {
+      title = item.name || item.address?.street || 'N/A'; // Prefer item.name if available
+      // Try item.listPrice, then item.price (more general), then item.lastSoldPrice as fallbacks
+      price = String(item.listPrice || item.price || item.lastSoldPrice || 'N/A'); 
+      priceNumeric = parseFloat(String(item.listPrice || item.price || item.lastSoldPrice || '0').replace(/[^0-9.]+/g, '')) || 0;
+      if(item.address) {
+        address = item.address.street || 'N/A';
+        city = item.address.locality || 'N/A';
+        state = item.address.region || 'N/A';
+        zipCode = item.address.postalCode || '';
+        location = `${address}, ${city}, ${state}`.replace(/^, |, $/g, '').replace(/^,|, $/g, '');
+        if (location === ', , ') location = 'N/A';
+      }
+      bedrooms = parseInt(item.beds || '0');
+      bathrooms = parseFloat(item.baths_total || item.baths || '0');
+      area = String(item.sqft || 'N/A');
+      areaNumeric = parseFloat(String(item.sqft || '0').replace(/[^0-9.]+/g, '')) || 0;
+      if (Array.isArray(item.photos) && item.photos.length > 0) {
+        imageUrls = item.photos.map(p => (typeof p === 'string' ? p : p?.href)).filter(u => u && u.startsWith('http'));
+      } else if (item.history && Array.isArray(item.history) && item.history.length > 0 && item.history[0].listing && Array.isArray(item.history[0].listing.photos)) {
+         imageUrls = item.history[0].listing.photos.map(p => p?.href).filter(u => u && u.startsWith('http'));
+      }
+      description = (item.description?.text || item.text || item.history?.[0]?.listing?.description?.text || '');
+      url = item.url || '#';
+      if(item.coordinates) coordinates = { lat: item.coordinates.latitude, lng: item.coordinates.longitude };
+      propertyType = item.type || 'N/A';
+      homeStatus = item.status || 'N/A'; // realtor uses item.status
+      if(item.cooling) features.push(`Cooling: ${item.cooling}`);
+      if(item.heating) features.push(`Heating: ${item.heating}`);
+      if(item.fireplace && item.fireplace.toLowerCase() !== 'no') features.push('Fireplace');
+      if(item.pool && item.pool.toLowerCase() !== 'no') features.push('Pool');
+      if(item.garage_type) features.push(`Garage: ${item.garage_type}`);
+      if(item.exterior) features.push(`Exterior: ${item.exterior}`);
+      scrapedAt = new Date().toISOString(); // Realtor sample doesn't have scrapedAt
+      // Similar to apartments-scraper, this creates one property. We need to avoid fall-through.
+
+    } else if (sourceToolName && sourceToolName.toLowerCase().includes('apartmentlist-scraper')) {
+      // Normalization for epctex/apartmentlist-scraper
+      // Each 'item' can have multiple 'units'. We'll create a property for each unit.
+      if (item.units && Array.isArray(item.units)) {
+        item.units.forEach(unit => {
+          const propertyName = item.propertyName || 'N/A';
+          const unitName = unit.name || unit.remoteListingId || unit.id;
+          const title = unitName ? `${propertyName} - Unit ${unitName}` : propertyName;
+
+          let unitPrice = String(unit.price || 'N/A');
+          let unitPriceNumeric = parseFloat(String(unit.price || '0').replace(/[^0-9.]+/g, '')) || 0;
+          
+          let unitBedrooms = 0;
+          if (unit.bed !== undefined && unit.bed !== null) {
+              const bedStr = String(unit.bed).toLowerCase();
+              if (bedStr === 'studio' || bedStr === 's') {
+                  unitBedrooms = 0;
+              } else {
+                  const bedMatch = bedStr.match(/\d+/);
+                  if (bedMatch) unitBedrooms = parseInt(bedMatch[0]);
+              }
+          }
+
+          let unitBathrooms = 0;
+           if (unit.bath !== undefined && unit.bath !== null) {
+              const bathMatch = String(unit.bath).match(/[\d.]+/);
+              if (bathMatch) unitBathrooms = parseFloat(bathMatch[0]);
+          }
+
+
+          let unitArea = String(unit.sqft || 'N/A');
+          let unitAreaNumeric = parseFloat(String(unit.sqft || '0').replace(/[^0-9.]+/g, '')) || 0;
+
+          let unitImages = [];
+          if (Array.isArray(unit.photos) && unit.photos.length > 0) {
+            unitImages = unit.photos.filter(p => typeof p === 'string' && p.startsWith('http'));
+          }
+          if (unitImages.length === 0 && Array.isArray(item.photos)) {
+            unitImages = item.photos.filter(p => typeof p === 'string' && p.startsWith('http'));
+          }
+          
+          let unitLocation = 'N/A';
+          let unitAddress = 'N/A';
+          let unitCity = 'N/A';
+          let unitState = 'N/A';
+          let unitZipCode = '';
+
+          if (item.location) {
+            unitAddress = item.location.streetAddress || item.location.streedAddress || 'N/A';
+            unitCity = item.location.city || 'N/A';
+            unitState = item.location.state || 'N/A';
+            unitZipCode = item.location.postalCode || '';
+            unitLocation = item.location.fullAddress || `${unitAddress}, ${unitCity}, ${unitState}`.replace(/^, |, $/g, '').replace(/^,|, $/g, '');
+            if (unitLocation === ', , ') unitLocation = 'N/A';
+          }
+
+          const normalizedUnitProperty = {
+            id: String(item.id ? `${item.id}-${unit.id || unit.remoteListingId}` : `aptlist-${unit.id || unit.remoteListingId || Math.random().toString(36).substr(2, 9)}`),
+            source: sourceToolName,
+            title: title,
+            price: unitPrice,
+            priceNumeric: unitPriceNumeric,
+            location: unitLocation,
+            address: unitAddress,
+            city: unitCity,
+            state: unitState,
+            zipCode: unitZipCode,
+            bedrooms: unitBedrooms,
+            bathrooms: unitBathrooms,
+            area: unitArea,
+            areaNumeric: unitAreaNumeric,
+            images: [...new Set(unitImages)],
+            description: item.description || '',
+            url: unit.applyOnlineUrl || item.url || '#',
+            propertyType: item.rentalType || 'apartment', // Assuming 'apartment' if not specified
+            homeStatus: unit.availability || (item.isActive ? 'active' : 'N/A'),
+            scrapedAt: item.scrapedAt || new Date().toISOString(),
+            features: [], // ApartmentList doesn't seem to have a direct 'features' array like others, amenities cover a lot.
+            amenities: Array.isArray(item.amenities) ? [...new Set(item.amenities.filter(a => typeof a === 'string'))] : [],
+            contactInfo: undefined, // No direct contact info in sample, may need to infer or skip
+            coordinates: item.coordinates ? { lat: item.coordinates.latitude, lng: item.coordinates.longitude } : undefined,
+            availability: unit.availableOn ? `Available from ${unit.availableOn}` : (unit.availability || undefined)
+          };
+          
+          if (!normalizedUnitProperty.priceNumeric || normalizedUnitProperty.priceNumeric === 0 || !normalizedUnitProperty.title || normalizedUnitProperty.title === 'N/A') {
+            console.log(`Skipping ApartmentList unit due to missing/invalid price or title: ${normalizedUnitProperty.title}, Price: ${normalizedUnitProperty.price} (Numeric: ${normalizedUnitProperty.priceNumeric})`);
+            return; // Skip this unit
+          }
+
+          properties.push(normalizedUnitProperty);
+        });
+        return; // <--- ADD THIS RETURN to skip default processing for the parent item
+      } else {
+        // Handle cases where an item might not have units (though typical for ApartmentList)
+        // Or create a single property from the main item if it makes sense
+        console.warn(`ApartmentList item ${item.id || item.url} did not have a 'units' array. Skipping direct item processing, property requires units.`);
+        return; // <--- ADD THIS RETURN to skip default processing if no units and we decide to skip
+      }
+    } else { // Default for Zillow (jupri-slash-zillow-scraper) and others
+      title = item.title || item.streetAddress || item.Title || item.address?.streetAddress || (typeof item.address === 'string' ? item.address : 'N/A');
+      price = String(item.price?.value || item.price?.data?.price || item.price?.slice(-1)[0]?.price || item.price || item.Price || 'N/A');
+      priceNumeric = parseFloat(String(item.price?.value || item.price?.data?.price || item.price?.slice(-1)[0]?.price || item.price || item.Price || '0').replace(/[^0-9.]+/g, '')) || 0;
+      location = (() => {
+        if (typeof item.location === 'object' && item.location !== null) {
+          if (item.regionString && typeof item.regionString === 'string') return item.regionString;
+          if (item.address?.city && item.address?.state) return `${item.address.city}, ${item.address.state}`;
+          if (item.city && item.state) return `${item.city}, ${item.state}`;
+          return 'N/A'; 
+        } else if (typeof item.location === 'string' && item.location.trim() !== '') {
+          return item.location;
+        } else {
+          if (item.regionString && typeof item.regionString === 'string') return item.regionString;
+          if (item.address?.city && item.address?.state) return `${item.address.city}, ${item.address.state}`;
+          if (item.city && item.state) return `${item.city}, ${item.state}`;
+          if (item.Location && typeof item.Location === 'string') return item.Location;
+          return 'N/A';
+        }
+      })();
+      address = item.address?.streetAddress || item.streetAddress || (typeof item.Address === 'string' ? item.Address : 'N/A');
+      city = item.city || item.address?.city || 'N/A';
+      state = item.state || item.address?.state || '';
+      zipCode = String(item.zipcode || item.address?.zipcode || '');
+      bedrooms = parseInt(String(item.bedrooms || item.beds || item.Bedrooms || item.bed || '0').match(/\d+/)?.[0] || '0');
+      bathrooms = parseFloat(String(item.bathrooms || item.baths || item.Bathrooms || item.bath || '0').match(/[\d.]+/)?.[0] || '0');
+      area = String(item.livingArea?.value || item.livingArea || item.sqft || item.Area || 'N/A');
+      areaNumeric = parseFloat(String(item.livingArea?.value || item.livingArea || item.sqft || item.Area || '0').replace(/[^0-9.]+/g, '')) || 0;
+      description = item.description || '';
+      url = item.url || item.detailUrl || item.URL || (sourceToolName.toLowerCase().includes('zillow') && item.zpid ? `https://www.zillow.com/homedetails/${item.zpid}_zpid/` : '#');
+      propertyType = item.propertyType || item.homeType || item.PropertyType || 'N/A';
+      homeStatus = item.homeStatus || item.HomeStatus || 'N/A';
+      scrapedAt = item.datetime || new Date().toISOString();
+      if (item.latLong) coordinates = { lat: item.latLong.latitude, lng: item.latLong.longitude };
+      else if (item.latitude && item.longitude) coordinates = { lat: parseFloat(item.latitude), lng: parseFloat(item.longitude) };
+      features = Array.isArray(item.features) ? item.features : (Array.isArray(item.attirbutes) ? item.attirbutes : []);
+      amenities = Array.isArray(item.amenities) ? item.amenities : [];
+      // Image extraction for Zillow & default
+      if (Array.isArray(item.photos) && item.photos.length > 0) {
+        imageUrls = item.photos.map(p => {
+          if (typeof p === 'string') return p;
+          if (p && typeof p === 'object') { return p.url || p.href || p.desktop || p.high || p.medium || p.thumb; }
+          return null;
+        }).filter(u => u);
+      } 
+      else if (item.media?.photo && typeof item.media.photo === 'object') {
+        const photoData = item.media.photo;
+        [photoData.high, photoData.desktop, photoData.medium, photoData.thumb].forEach(u => { if (u && typeof u === 'string') imageUrls.push(u); });
+      }
+      else if (typeof item.imgSrc === 'string') imageUrls.push(item.imgSrc);
+      else if (item.image && typeof item.image === 'string') imageUrls.push(item.image);
+      else if (Array.isArray(item.Media) && item.Media.length > 0) imageUrls = item.Media.map(m => m.url).filter(u => u);
+      else if (item.zpid && item.hdpData?.homeInfo?.photos && Array.isArray(item.hdpData.homeInfo.photos)) {
+        imageUrls = item.hdpData.homeInfo.photos.flatMap(p => 
+            (p.mixedSources?.jpeg && Array.isArray(p.mixedSources.jpeg)) ? p.mixedSources.jpeg.map(jpegInfo => jpegInfo.url) : []
+        ).filter(u => u);
       }
     }
 
-    // Ensure unique, valid HTTP(S) URLs
-    imageUrls = [...new Set(imageUrls.filter(url => url && typeof url === 'string' && url.startsWith('http')))];
+    imageUrls = [...new Set(imageUrls.filter(u => u && typeof u === 'string' && u.startsWith('http')))];
     
-    if (imageUrls.length > 0) {
-      console.log(`Item ${item.zpid || item.id}: Successfully extracted ${imageUrls.length} image URLs. First one: ${imageUrls[0]}`);
-    } else {
-      console.log(`Item ${item.zpid || item.id}: No image URLs extracted after all attempts. Raw item:`, JSON.stringify(item, null, 2).substring(0, 500) + "...");
-    }
-
     const normalizedProperty = {
-      id: String(item.zpid || item.id || item.ZPID || item.URL || `mcp-${Math.random().toString(36).substr(2, 9)}`),
+      id: String(item.id || item.zpid || item.ZPID || item.URL || `mcp-${sourceToolName.replace(/[^a-zA-Z0-9]/g, '_')}-${Math.random().toString(36).substr(2, 9)}`),
       source: sourceToolName,
-      title: item.streetAddress || item.Title || item.address?.streetAddress || (typeof item.address === 'string' ? item.address : 'N/A'),
-      price: String(item.price?.value || item.price?.data?.price || item.price?.slice(-1)[0]?.price || item.price || item.Price || 'N/A'),
-      priceNumeric: parseFloat(String(item.price?.value || item.price?.data?.price || item.price?.slice(-1)[0]?.price || item.price || item.Price || '0').replace(/[^0-9.]+/g, '')) || 0,
-      location: item.regionString || item.city || item.Location || (item.address?.city ? `${item.address.city}, ${item.address.state}` : 'N/A'),
-      address: item.streetAddress || item.address?.streetAddress || (typeof item.Address === 'string' ? item.Address : 'N/A'),
-      city: item.city || item.address?.city || 'N/A',
-      state: item.state || item.address?.state || '',
-      zipCode: String(item.zipcode || item.address?.zipcode || ''),
-      bedrooms: parseInt(String(item.bedrooms || item.beds || item.Bedrooms || item.bed || '0').match(/\d+/)?.[0] || '0'),
-      bathrooms: parseFloat(String(item.bathrooms || item.baths || item.Bathrooms || item.bath || '0').match(/[\d.]+/)?.[0] || '0'),
-      area: String(item.livingArea?.value || item.livingArea || item.sqft || item.Area || 'N/A'),
-      areaNumeric: parseFloat(String(item.livingArea?.value || item.livingArea || item.sqft || item.Area || '0').replace(/[^0-9.]+/g, '')) || 0,
-      images: imageUrls, // Use the extracted image URLs
-      description: item.description || item.Description || '',
-      url: item.detailUrl || item.URL || item.url || `https://www.zillow.com/homedetails/${item.zpid}_zpid/`, // Construct Zillow URL if only ZPID is available
-      propertyType: item.propertyType || item.homeType || item.PropertyType || 'N/A',
-      homeStatus: item.homeStatus || item.HomeStatus || 'N/A',
-      scrapedAt: new Date().toISOString(),
-      features: Array.isArray(item.features) ? item.features : [],
-      amenities: Array.isArray(item.amenities) ? item.amenities : [],
-      contactInfo: item.contactPhone || item.brokerName ? { phone: item.contactPhone, agentName: item.brokerName } : undefined,
-      coordinates: item.latLong ? { lat: item.latLong.latitude, lng: item.latLong.longitude } : (item.latitude && item.longitude ? { lat: item.latitude, lng: item.longitude } : undefined),
+      title: title,
+      price: price,
+      priceNumeric: priceNumeric,
+      location: location,
+      address: address,
+      city: city,
+      state: state,
+      zipCode: zipCode,
+      bedrooms: bedrooms,
+      bathrooms: bathrooms,
+      area: area,
+      areaNumeric: areaNumeric,
+      images: imageUrls, 
+      description: description,
+      url: url,
+      propertyType: propertyType,
+      homeStatus: homeStatus,
+      scrapedAt: scrapedAt,
+      features: [...new Set(features)], 
+      amenities: [...new Set(amenities)], 
+      contactInfo: item.contactPhone || item.brokerName ? { phone: item.contactPhone, agentName: item.brokerName } : (item.contact?.phone ? {phone: item.contact.phone} : undefined),
+      coordinates: coordinates,
     };
     
     if (sourceToolName.toLowerCase().includes('zillow')) {
-      const status = String(normalizedProperty.homeStatus).toUpperCase();
-      if (status && status !== 'FOR_RENT' && status !== 'RENT' && status !== 'APARTMENT_COMMUNITY' && status !== 'APARTMENTS') {
+      const zillowStatus = String(normalizedProperty.homeStatus).toUpperCase();
+      if (zillowStatus && zillowStatus !== 'FOR_RENT' && zillowStatus !== 'RENT' && zillowStatus !== 'APARTMENT_COMMUNITY' && zillowStatus !== 'APARTMENTS') {
          console.log(`Skipping Zillow property not for rent: ${normalizedProperty.title} (Status: ${normalizedProperty.homeStatus})`);
-         return;
+         return; 
       }
-      // Ensure Zillow properties have a Zillow URL if only ZPID is present
       if (!normalizedProperty.url.startsWith('http') && item.zpid) {
         normalizedProperty.url = `https://www.zillow.com/homedetails/${item.zpid}_zpid/`;
       }
     }
-    
-    if (!normalizedProperty.priceNumeric || !normalizedProperty.title || normalizedProperty.title === 'N/A') {
-        return;
+    if (sourceToolName.toLowerCase().includes('realtor-scraper')) {
+        const realtorStatus = String(normalizedProperty.homeStatus).toLowerCase();
+        // Assuming item.mode was passed down if we want to filter by it. For now, just check status.
+        // For RENT mode, common statuses are 'for_rent', 'active', potentially others. 'sold', 'off_market' are not for rent.
+        if (realtorStatus.includes('sold') || realtorStatus.includes('off_market') || realtorStatus.includes('pending')) {
+            // This check might be too broad if we also allow 'BUY' mode for this scraper.
+            // For now, if it looks like not actively for rent/sale, skip.
+            console.log(`Skipping Realtor.com property with status: ${realtorStatus} for ${normalizedProperty.title}`);
+            return; 
+        }
+    }
+
+    if (!normalizedProperty.priceNumeric || normalizedProperty.priceNumeric === 0 || !normalizedProperty.title || normalizedProperty.title === 'N/A') {
+        console.log(`Skipping property due to missing/invalid price or title: ${normalizedProperty.title}, Price: ${normalizedProperty.price} (Numeric: ${normalizedProperty.priceNumeric})`);
+        return; 
     }
 
     properties.push(normalizedProperty);
   });
   
   const uniqueProperties = deduplicateProperties(properties);
-  console.log(`Normalization resulted in ${uniqueProperties.length} unique properties from ${datasetItems.length} items.`);
+  console.log(`Normalization for ${sourceToolName} resulted in ${uniqueProperties.length} unique properties from ${datasetItems.length} items.`);
   return uniqueProperties;
 }
 
@@ -350,7 +643,13 @@ function deduplicateProperties(properties) {
   const unique = [];
   const seen = new Set();
   for (const prop of properties) {
-    const key = `${(prop.address || prop.title || '').toLowerCase()}-${prop.priceNumeric}-${(prop.location || '').toLowerCase()}`;
+    // Ensure that the components of the key are strings. 
+    // prop.title is generally a good candidate for a string part of the address/description.
+    // prop.address is also a good candidate if available and a string.
+    const addressPart = typeof prop.address === 'string' ? prop.address : (typeof prop.title === 'string' ? prop.title : '');
+    const locationString = typeof prop.location === 'string' ? prop.location : (typeof prop.city === 'string' ? prop.city : '');
+
+    const key = `${addressPart.toLowerCase()}-${prop.priceNumeric}-${locationString.toLowerCase()}`;
     if (!seen.has(key)) {
       seen.add(key);
       unique.push(prop);
@@ -359,98 +658,128 @@ function deduplicateProperties(properties) {
   return unique;
 }
 
+const POLLING_INTERVAL = 15000; // 15 seconds
+const MAX_POLLING_DURATION = 9 * 60 * 1000; // 9 minutes, to fit within 10 min total timeout
+
+async function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function fetchPropertiesViaMCP(toolName, toolInput) {
-  console.log(`ℹ️ Attempting to fetch properties via MCP tool: ${toolName}`);
+  console.log(`ℹ️ Attempting to fetch properties for tool: ${toolName} (strategy: MCP polling for all tools unless specified otherwise)`);
   const apifyToken = process.env.APIFY_TOKEN;
   if (!apifyToken) {
-    console.error('❌ Apify token not configured. MCP interaction will fail.');
-    throw new Error('Apify token not configured for MCP');
+    console.error('❌ Apify token not configured.');
+    throw new Error('Apify token not configured');
   }
   if (!toolName || typeof toolInput === 'undefined') {
-    console.error('❌ toolName and toolInput are required for fetchPropertiesViaMCP.');
+    console.error('❌ toolName and toolInput are required.');
     throw new Error('toolName and toolInput are required.');
   }
 
+  // Map tool names from Claude (underscore_format) to MCP server (slash-format)
+  let mcpToolName = toolName;
+  if (toolName === 'jupri_zillow_scraper') {
+    mcpToolName = 'jupri-slash-zillow-scraper';
+  } else if (toolName === 'epctex_apartments_scraper') {
+    mcpToolName = 'epctex-slash-apartments-scraper';
+  } else if (toolName === 'epctex_realtor_scraper') {
+    mcpToolName = 'epctex-slash-realtor-scraper';
+  } else if (toolName === 'epctex_apartmentlist_scraper') {
+    mcpToolName = 'epctex-slash-apartmentlist-scraper';
+  }
+  console.log(`ℹ️ Mapped tool name for MCP: ${toolName} -> ${mcpToolName}`);
+
+  let finalToolInput = toolInput;
+  // Remove specific input transformation for the old craigslist scraper
+  // if (toolName === 'ivanvs-slash-craigslist-scraper') {
+  //   if (toolInput && toolInput.searchUrls) {
+  //     console.log(`Transforming input for ${toolName}: from searchUrls to urls`);
+  //     finalToolInput = { urls: toolInput.searchUrls };
+  //   }
+  //   if (!finalToolInput.hasOwnProperty('maxItems')) {
+  //     console.log(`Injecting default maxItems: 30 for ${toolName}`);
+  //     finalToolInput.maxItems = 30;
+  //   } else {
+  //     console.log(`Using provided maxItems: ${finalToolInput.maxItems} for ${toolName}`);
+  //   }
+  //  // Direct Apify API call block for ivanvs-slash-craigslist-scraper is now removed.
+  // }
+
+  // Polling strategy for all tools by default
+  let obtainedRunId = null;
+  let obtainedDatasetId = null;
+
   try {
-    const rawMcpResult = await callApifyMCPTool(toolName, toolInput, apifyToken);
-    console.log(`✅ Raw result from MCP tool ${toolName} received in fetchPropertiesViaMCP.`);
-    // console.log("Raw MCP Result Full:", JSON.stringify(rawMcpResult, null, 2)); // Uncomment for deep debugging
+    console.log(`Calling callApifyMCPTool to get IDs for ${mcpToolName}...`);
+    const ids = await callApifyMCPTool(mcpToolName, finalToolInput, apifyToken);
+    obtainedRunId = ids.runId;
+    obtainedDatasetId = ids.datasetId;
+    console.log(`IDs received from callApifyMCPTool for ${mcpToolName}: RunID=${obtainedRunId}, DatasetID=${obtainedDatasetId}`);
 
-    let datasetId = null;
-    let runId = null;
+    if (!obtainedRunId && !obtainedDatasetId) {
+      console.error(`❌ No RunId or DatasetId received from MCP call for ${mcpToolName}. Cannot poll.`);
+      return [];
+    }
 
-    if (rawMcpResult && rawMcpResult.content && Array.isArray(rawMcpResult.content)) {
-      for (const item of rawMcpResult.content) {
-        if (item.type === 'text' && item.text) {
-          const textContent = item.text;
-          // console.log(`MCP text content from ${toolName}:`, textContent.substring(0, 500));
-
-          const runIdRegex = /"runId":"([^"]+)"|"id":"([^"]+)"/i; // For run info
-          const datasetIdRegex = /"datasetId":"([^"]+)"|"defaultDatasetId":"([^"]+)"|Dataset information: {"id":"([^"]+)"/i;
-          
-          let runIdMatch = textContent.match(runIdRegex);
-          let datasetIdMatch = textContent.match(datasetIdRegex);
-
-          if (runIdMatch && !runId) runId = runIdMatch[1] || runIdMatch[2];
-          if (datasetIdMatch && !datasetId) datasetId = datasetIdMatch[1] || datasetIdMatch[2] || datasetIdMatch[3];
-          
-          try {
-            const parsedText = JSON.parse(textContent);
-            if (parsedText.runId && !runId) runId = parsedText.runId;
-            if (parsedText.actorRunId && !runId) runId = parsedText.actorRunId;
-            if (parsedText.datasetId && !datasetId) datasetId = parsedText.datasetId;
-            if (parsedText.defaultDatasetId && !datasetId) datasetId = parsedText.defaultDatasetId;
-            
-            if (Array.isArray(parsedText)) {
-                console.log(`MCP result for ${toolName} is a direct array of items. Normalizing directly.`);
-                return normalizeAndStructureDatasetItems(parsedText, toolName);
-            }
-          } catch (e) { /* Not direct JSON or not the one we need */ }
+    // If we have a runId, poll for its completion to get the definitive datasetId
+    if (obtainedRunId) {
+      console.log(`Polling actor run ${obtainedRunId} for ${mcpToolName}...`);
+      const startTime = Date.now();
+      while (Date.now() - startTime < MAX_POLLING_DURATION) {
+        const runDetailsUrl = `https://api.apify.com/v2/actor-runs/${obtainedRunId}?token=${apifyToken}`;
+        console.log(`Fetching run details: ${runDetailsUrl.replace(apifyToken, '<TOKEN>')}`);
+        const runResponse = await fetch(runDetailsUrl);
+        if (!runResponse.ok) {
+          const errorText = await runResponse.text();
+          console.error(`❌ Failed to fetch run details for ${obtainedRunId} (status ${runResponse.status}): ${errorText}`);
+          throw new Error(`Failed to fetch run details for ${obtainedRunId}`);
         }
+        const runData = await runResponse.json();
+        console.log(`Run ${obtainedRunId} status: ${runData.data?.status}, DatasetId from run: ${runData.data?.defaultDatasetId}`);
+
+        if (runData.data?.status === 'SUCCEEDED') {
+          obtainedDatasetId = runData.data.defaultDatasetId;
+          console.log(`✅ Run ${obtainedRunId} SUCCEEDED. Using DatasetID: ${obtainedDatasetId}`);
+          break; // Exit polling loop
+        } else if (['FAILED', 'TIMED_OUT', 'ABORTED'].includes(runData.data?.status)) {
+          console.error(`❌ Run ${obtainedRunId} for ${mcpToolName} did not succeed. Status: ${runData.data?.status}`);
+          return []; // Stop if the run failed
+        }
+        await sleep(POLLING_INTERVAL);
+      }
+
+      if (!obtainedDatasetId) {
+        console.error(`❌ Polling for run ${obtainedRunId} timed out or run did not provide a datasetId.`);
+        return [];
       }
     }
-    
-    console.log(`Extracted from MCP response for ${toolName} - Run ID: ${runId}, Dataset ID: ${datasetId}`);
 
-    if (datasetId) {
-      console.log(`Fetching items from Dataset ID: ${datasetId} for tool ${toolName}`);
-      const datasetUrl = `https://api.apify.com/v2/datasets/${datasetId}/items?token=${apifyToken}&format=json&clean=true&limit=50`; // Limit to 50 for now
+    // If we only had datasetId from the start, or got it from the run, fetch items
+    if (obtainedDatasetId) {
+      console.log(`Fetching items from Dataset ID: ${obtainedDatasetId} for tool ${mcpToolName}`);
+      const datasetUrl = `https://api.apify.com/v2/datasets/${obtainedDatasetId}/items?token=${apifyToken}&format=json&clean=true&limit=100`; // Limit to 100 for now
+      console.log(`Fetching dataset items: ${datasetUrl.replace(apifyToken, '<TOKEN>')}`);
       
       const response = await fetch(datasetUrl);
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`❌ Failed to fetch dataset items for ${datasetId}: ${response.status} - ${errorText}`);
+        console.error(`❌ Failed to fetch dataset items for ${obtainedDatasetId}: ${response.status} - ${errorText}`);
         throw new Error(`Failed to fetch dataset items: ${response.status}`);
       }
       const datasetItems = await response.json();
-      console.log(`✅ Successfully fetched ${datasetItems.length} items from dataset ${datasetId} for ${toolName}.`);
+      console.log(`✅ Successfully fetched ${datasetItems ? datasetItems.length : '0 (or non-array)'} items from dataset ${obtainedDatasetId} for ${mcpToolName}.`);
       
-      return normalizeAndStructureDatasetItems(datasetItems, toolName);
-
+      const normalizedProperties = normalizeAndStructureDatasetItems(datasetItems, mcpToolName);
+      console.log(`Normalized ${normalizedProperties.length} properties from dataset ${obtainedDatasetId} for ${mcpToolName}.`);
+      return normalizedProperties;
     } else {
-      console.warn(`Could not determine datasetId from MCP response for tool ${toolName}. Attempting to normalize rawMcpResult directly if it's an array.`);
-      if (rawMcpResult && rawMcpResult.content && Array.isArray(rawMcpResult.content) && rawMcpResult.content[0]?.type === 'text' && rawMcpResult.content[0]?.text) {
-        try {
-          const potentialDirectResults = JSON.parse(rawMcpResult.content[0].text);
-          if (Array.isArray(potentialDirectResults)) {
-            console.log(`Treating raw MCP text content as direct results array for ${toolName}.`);
-            return normalizeAndStructureDatasetItems(potentialDirectResults, toolName);
-          }
-        } catch (e) {
-          console.warn(`Raw MCP text for ${toolName} was not a direct JSON array of results. Content preview: ${rawMcpResult.content[0].text.substring(0,200)}`);
-        }
-      }
-      console.log(`No dataset ID found and no direct array in MCP response for ${toolName}. Returning empty array.`);
+      console.error(`❌ No datasetId could be determined for ${mcpToolName} after all steps.`);
       return [];
     }
 
   } catch (error) {
-    console.error(`❌ Error in fetchPropertiesViaMCP for tool ${toolName}:`, error);
-    // Log the error details for better debugging
-    if (error.response && typeof error.response.text === 'function') {
-      const errorText = await error.response.text();
-      console.error("Underlying error response text:", errorText);
-    }
+    console.error(`❌ Error in fetchPropertiesViaMCP (polling) for tool ${mcpToolName}:`, error);
     return []; 
   }
 }
@@ -462,7 +791,7 @@ app.post('/api/properties/mcp-search', async (req, res) => {
   try {
     const { toolName, toolInput, criteria } = req.body; // `criteria` might still be sent by frontend for context, but toolName/Input are primary
     console.log('🚀 MCP Property search request received (MCP-only path):', 
-                JSON.stringify({ toolName, toolInputIsObject: typeof toolInput === 'object', criteria }, null, 2));
+                JSON.stringify({ toolName, toolInputIsObject: typeof toolInput === 'object', criteria: !!criteria }, null, 2)); // Log criteria presence
     
     if (!toolName || typeof toolInput === 'undefined') { // toolInput can be null or empty object
       return res.status(400).json({ 
@@ -477,7 +806,7 @@ app.post('/api/properties/mcp-search', async (req, res) => {
     console.log(`🔍 Delegating to fetchPropertiesViaMCP for tool: ${toolName}...`);
     const properties = await fetchPropertiesViaMCP(toolName, toolInput);
     
-    console.log(`✅ MCP-based property search completed via ${toolName}, found ${properties.length} properties`);
+    console.log(`✅ MCP-based property search completed via ${toolName}, found ${properties ? properties.length : 'undefined/null'} properties. Sending to client.`);
     res.json({ properties });
     
   } catch (error) {

@@ -60,7 +60,6 @@ export const PropertyCard = ({ property }: PropertyCardProps) => {
     if (sourceString && sourceString.toLowerCase().includes('craigslist')) {
       return 'Craigslist';
     }
-    // Fallback to a capitalized version of the original source if no specific mapping
     return sourceString ? sourceString.charAt(0).toUpperCase() + sourceString.slice(1) : 'Unknown Source';
   };
 

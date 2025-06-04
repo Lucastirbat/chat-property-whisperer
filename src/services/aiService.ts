@@ -21,65 +21,158 @@ export class AIService {
       
       const claudeMessages = this.formatMessagesForClaude(messages);
       
+      const tools = [
+        {
+          name: 'jupri_zillow_scraper',
+          description: "Search Zillow for rental housing. This tool PRIMARILY uses a 'prompt' string. Construct a detailed natural language prompt encompassing all known user criteria (location, price, bedrooms, property type, keywords like 'pet-friendly', 'parking'). It also requires 'search_type': 'rent'. Optionally, it can take 'limit' (e.g., 15-20) to control the number of results.",
+          input_schema: {
+            type: 'object',
+            properties: {
+              prompt: {
+                type: 'string',
+                description: "A natural language search query for Zillow. e.g., '2 bedroom apartments for rent in San Francisco under $3500 with parking and pet friendly'. Include all available details."
+              },
+              search_type: { 
+                type: 'string',
+                enum: ['rent'],
+                description: "Must be 'rent' for rental searches."
+              },
+              limit: {
+                type: 'integer',
+                description: 'Optional. Maximum number of properties to fetch (e.g., 15 or 20).'
+              }
+            },
+            required: ['prompt', 'search_type']
+          }
+        },
+        {
+          name: 'epctex_apartments_scraper',
+          description: "Searches Apartments.com for rental properties. It can take a `search` keyword for a location (e.g., 'New York'), `startUrls` for specific Apartments.com URLs, `maxItems` to limit results, and `endPage` to limit pagination. It requires a `proxy` configuration: { \"useApifyProxy\": true }.",
+          input_schema: {
+            type: 'object',
+            properties: {
+              search: {
+                type: 'string',
+                description: "Location keyword to search for, e.g., 'New York' or 'San Francisco, CA'."
+              },
+              startUrls: {
+                type: 'array',
+                description: "Optional. List of specific Apartments.com URLs to scrape.",
+                items: { type: 'string', format: 'url' }
+              },
+              maxItems: {
+                type: 'integer',
+                description: "Optional. Maximum number of properties to scrape."
+              },
+              endPage: {
+                type: 'integer',
+                description: "Optional. Final number of search result pages to scrape."
+              },
+              proxy: {
+                type: 'object',
+                description: "Required. Proxy configuration.",
+                properties: {
+                  useApifyProxy: {
+                    type: 'boolean',
+                    description: "Must be true to use Apify Proxy."
+                  }
+                },
+                required: ['useApifyProxy']
+              },
+              includeAllImages: { type: 'boolean', description: "Optional. Set to true to download all images.", default: false },
+              includeVirtualTours: { type: 'boolean', description: "Optional. Set to true to include virtual tour links.", default: false }
+            },
+            required: ['proxy'] // `search` or `startUrls` would typically be required too, user needs to provide one.
+          }
+        },
+        {
+          name: 'epctex_realtor_scraper',
+          description: "Searches Realtor.com for properties. It can take a `search` keyword (e.g., city or zip code) along with a `mode` ('RENT', 'BUY', or 'SOLD'). Alternatively, it can take `startUrls` for specific Realtor.com URLs. Other options include `maxItems` and `endPage`. It requires a `proxy` configuration: { \"useApifyProxy\": true }.",
+          input_schema: {
+            type: 'object',
+            properties: {
+              search: {
+                type: 'string',
+                description: "Keyword for search (e.g., city, zip code like 'Las Vegas' or '90210'). Use with 'mode'."
+              },
+              mode: {
+                type: 'string',
+                enum: ['RENT', 'BUY', 'SOLD'],
+                description: "Mode of search. Required if 'search' is provided. For rentals, use 'RENT'."
+              },
+              startUrls: {
+                type: 'array',
+                description: "Optional. List of specific Realtor.com URLs to scrape.",
+                items: { type: 'string', format: 'url' }
+              },
+              maxItems: {
+                type: 'integer',
+                description: "Optional. Maximum number of items to scrape."
+              },
+              endPage: {
+                type: 'integer',
+                description: "Optional. Final number of search result pages to scrape."
+              },
+              proxy: {
+                type: 'object',
+                description: "Required. Proxy configuration.",
+                properties: {
+                  useApifyProxy: {
+                    type: 'boolean',
+                    description: "Must be true to use Apify Proxy."
+                  }
+                },
+                required: ['useApifyProxy']
+              },
+              includeFloorplans: { type: 'boolean', description: "Optional. Set to true to include floorplan data.", default: false }
+            },
+            required: ['proxy'] // `search`+`mode` OR `startUrls` would typically be required.
+          }
+        },
+        {
+          name: 'epctex_apartmentlist_scraper',
+          description: "Searches ApartmentList.com for rental properties. Requires a `proxy` configuration: { \"useApifyProxy\": true }. You can provide `startUrls` (specific ApartmentList.com URLs, including search result pages or specific property detail pages), `maxItems` to limit the number of results, and `endPage` to limit pagination if scraping a list via `startUrls`. Example: { \"startUrls\": [\"https://www.apartmentlist.com/ca/san-francisco\"], \"maxItems\": 15, \"proxy\": { \"useApifyProxy\": true } }.",
+          input_schema: {
+            type: 'object',
+            properties: {
+              startUrls: {
+                type: 'array',
+                description: "List of ApartmentList.com URLs. Can be search result URLs or specific property detail URLs.",
+                items: { type: 'string', format: 'url' }
+              },
+              maxItems: {
+                type: 'integer',
+                description: "Optional. Maximum number of properties to scrape. Applies to each URL if multiple are given."
+              },
+              endPage: {
+                type: 'integer',
+                description: "Optional. Final number of pages to scrape if a startUrl is a list. Default is infinite."
+              },
+              proxy: {
+                type: 'object',
+                description: "Required. Proxy configuration.",
+                properties: {
+                  useApifyProxy: {
+                    type: 'boolean',
+                    description: "Must be true to use Apify Proxy."
+                  }
+                },
+                required: ['useApifyProxy']
+              }
+            },
+            required: ['proxy', 'startUrls'] // Requires at least one URL to start.
+          }
+        }
+        // ivanvs-slash-craigslist-scraper removed
+        // Other new scrapers will be added here
+      ];
+      
       const requestBody = {
         model: 'claude-3-5-sonnet-20240620', // Ensure you're using a strong tool-use model
         max_tokens: 4000,
         system: systemPrompt,
         messages: claudeMessages,
-        tools: [
-          {
-            name: 'epctex-slash-redfin-scraper', 
-            description: 'Search for rental properties on Redfin. Use for Redfin-specific searches. Parameters: location (string), maxPrice (number), bedrooms (number), propertyType (string enum), query (string). Required: location.',
-            input_schema: {
-              type: 'object',
-              properties: {
-                location: { type: 'string', description: 'City, State, or ZIP Code for Redfin (e.g., "San Francisco, CA")' },
-                maxPrice: { type: 'number', description: 'Max rent price for Redfin (e.g., 3000)' },
-                bedrooms: { type: 'number', description: 'Number of bedrooms for Redfin (e.g., 2)' },
-                propertyType: { type: 'string', enum: ['apartment', 'house', 'condo', 'townhouse', 'any'], description: 'Property type for Redfin (e.g., "apartment")' },
-                query: { type: 'string', description: 'General query for Redfin (e.g., "apartments in Austin TX under $2000")' },
-              },
-              required: ['location'] 
-            }
-          },
-          {
-            name: 'jupri-slash-zillow-scraper', // Zillow tool
-            description: 'Search Zillow for rentals. Use a detailed "prompt" string for all search criteria (location, price, bedrooms, etc.). Also requires "search_type" to be "rent". "limit" is optional.',
-            input_schema: { // Simplified to match the "prompt-first" strategy strictly
-              type: 'object',
-              properties: {
-                prompt: { 
-                  type: 'string', 
-                  description: 'REQUIRED: A natural language search query for Zillow (e.g., "2 bedroom apartments for rent in San Francisco under $3500 with a pool") OR a full Zillow search URL.' 
-                },
-                search_type: { 
-                  type: 'string', 
-                  enum: ['rent'], // Only allow "rent"
-                  description: 'REQUIRED: Must be "rent" for rental properties.' 
-                },
-                limit: { 
-                  type: 'integer', 
-                  description: 'Optional: Number of results (1-1000). Suggest 10-20. Defaults to actor\'s own default if not provided.' 
-                }
-              },
-              required: ['prompt', 'search_type'] 
-            }
-          },
-          {
-            name: 'ivanvs-slash-craigslist-scraper', 
-            description: 'Search Craigslist for rentals. Parameters: location (string), query (string), maxPrice (number), bedrooms (number). Required: location, query.',
-            input_schema: {
-              type: 'object',
-              properties: {
-                location: { type: 'string', description: 'Craigslist city/subdomain (e.g., "sfbay")' },
-                maxPrice: { type: 'number', description: 'Max rent price (e.g., 2000)' },
-                bedrooms: { type: 'number', description: 'Number of bedrooms (e.g., 1)' },
-                query: { type: 'string', description: 'Search query (e.g., "2 bedroom downtown no fee")' },
-              },
-              required: ['location', 'query'] 
-            }
-          }
-        ]
+        tools: tools
       };
       
       const response = await fetch(`${this.baseUrl}/api/ai/chat`, {
@@ -122,95 +215,177 @@ export class AIService {
     tools: any[] // Pass tools for follow-up
   ): Promise<{ response: string; newState: ConversationState, properties?: UnifiedProperty[] }> {
     
-    let fetchedProperties: UnifiedProperty[] | undefined = undefined;
+    let allFetchedProperties: UnifiedProperty[] = [];
 
-    // Check if Claude wants to use tools
     if (claudeResponse.stop_reason === 'tool_use') {
       console.log('🛠️ Claude wants to use MCP tools');
       
-      // Find the tool use request
-      const toolUseContent = claudeResponse.content.find((content: any) => content.type === 'tool_use');
+      const toolUseContents = claudeResponse.content.filter((content: any) => content.type === 'tool_use');
       
-      if (toolUseContent) { // Check if toolUseContent is found
-        console.log(`🏠 Claude requesting tool: ${toolUseContent.name} with input:`, toolUseContent.input);
+      if (toolUseContents && toolUseContents.length > 0) {
+        console.log(`🏠 Claude requesting ${toolUseContents.length} tools.`);
         
-        // Execute the property search via our backend's MCP integration
-        // We pass the exact tool name and input Claude provided
-        const searchResult = await this.executeMCPPropertySearch(toolUseContent.name, toolUseContent.input);
+        const toolExecutionPromises = toolUseContents.map(async (toolUseContent: any) => {
+          console.log(`Executing tool: ${toolUseContent.name} with input:`, toolUseContent.input);
+          const searchResult = await this.executeMCPPropertySearch(toolUseContent.name, toolUseContent.input);
+          return {
+            tool_use_id: toolUseContent.id,
+            name: toolUseContent.name, // For logging/debugging results
+            ...searchResult // Spread success, properties, count, message, error
+          };
+        });
+
+        // Wait for all tool executions to settle (either resolve or reject)
+        const toolExecutionResults = await Promise.allSettled(toolExecutionPromises);
+
+        const toolResultsForClaude: any[] = [];
         
-        if (searchResult.success && searchResult.properties) {
-          fetchedProperties = searchResult.properties; // Store fetched properties
+        toolExecutionResults.forEach(settledResult => {
+          if (settledResult.status === 'fulfilled') {
+            const result = settledResult.value;
+            console.log(`✅ Tool ${result.name} (ID: ${result.tool_use_id}) executed. Success: ${result.success}. Properties found: ${result.properties?.length || 0}`);
+            if (result.success && result.properties && result.properties.length > 0) {
+              allFetchedProperties = allFetchedProperties.concat(result.properties);
+            }
+            // Add to results for Claude, whether success or backend-reported failure
+            toolResultsForClaude.push({
+              type: 'tool_result',
+              tool_use_id: result.tool_use_id,
+              content: JSON.stringify({ // Keep the structure executeMCPPropertySearch returns
+                success: result.success,
+                count: result.count,
+                message: result.message,
+                error: result.error, // Will be undefined if success
+                // We don't send the full properties array back to Claude in tool_result, just a summary
+                // Claude will summarize based on the properties it *receives* in the final step.
+              })
+            });
+          } else {
+            // This case handles errors in the promise execution itself (e.g., network error in executeMCPPropertySearch before backend responds)
+            // However, executeMCPPropertySearch is designed to return a structured error, so this might be rare.
+            console.error('❌ Tool execution promise rejected:', settledResult.reason);
+            // We need a tool_use_id to report back to Claude. This is tricky if the promise itself failed.
+            // For now, we might not be able to report this specific failure back in the structured tool_result format
+            // if we can't access the original tool_use_id easily here.
+            // This part might need refinement if such errors become common.
+            // For now, we'll rely on executeMCPPropertySearch to return success:false.
+          }
+        });
+        
+        if (toolResultsForClaude.length === 0 && toolUseContents.length > 0) {
+           // This case should ideally not be hit if executeMCPPropertySearch always returns a structured response
+           console.warn("No tool results could be formulated for Claude, despite tool_use blocks being present.");
+           // Potentially create a generic error tool_result for each tool_use_id if possible.
+           // For now, let Claude respond without specific tool results if this rare case occurs.
         }
-        
-        // Send the tool result back to Claude for final response
+
+
+        // Send all tool results back to Claude for a final response
         const followUpRequestBody = {
-          model: 'claude-3-5-sonnet-20240620',
-          max_tokens: 4000,
+          model: "claude-3-5-sonnet-20240620",
           messages: [
             ...claudeMessages,
             {
               role: 'assistant',
-              content: claudeResponse.content // Send the full content array as per Anthropic docs
+              content: claudeResponse.content // Send the full original assistant content array
             },
             {
               role: 'user',
-              content: [{
-                type: 'tool_result',
-                tool_use_id: toolUseContent.id, // Use the id from the tool_use content block
-                content: JSON.stringify(searchResult) // Ensure results are stringified
-              }]
+              content: toolResultsForClaude // This is now an array of tool_result objects
             }
           ],
-          tools: tools // Include tools in the follow-up
+          system: this.buildSystemPromptWithMCP(currentState),
+          max_tokens: 4096,
+          stream: false,
+          // No tools needed for this summarization call
         };
 
-        const followUpResponse = await fetch(`${this.baseUrl}/api/ai/chat`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(followUpRequestBody)
-        });
+        console.log('[AIService] Preparing for follow-up call to Claude. Request body:', JSON.stringify(followUpRequestBody, null, 2));
+        let followUpData: any;
+        let aiFinalText = "I've finished searching with the available tools."; // Default message
 
-        if (!followUpResponse.ok) {
-          const errorText = await followUpResponse.text();
-          console.error('Follow-up AI API Error:', followUpResponse.status, errorText);
-          throw new Error(`Follow-up AI API error: ${followUpResponse.status}`);
+        const followUpController = new AbortController();
+        const followUpTimeoutId = setTimeout(() => followUpController.abort(), 60000); // 60 seconds timeout
+
+        try {
+          const followUpResponse = await fetch(`${this.baseUrl}/api/ai/chat`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(followUpRequestBody),
+            signal: followUpController.signal
+          });
+
+          clearTimeout(followUpTimeoutId);
+
+          if (!followUpResponse.ok) {
+            const errorText = await followUpResponse.text();
+            console.error(`[AIService] Follow-up call to Claude FAILED. Status: ${followUpResponse.status}. Body: ${errorText}`);
+            // Use a default response and proceed with any properties found
+            aiFinalText = `I found some properties, but encountered an issue when trying to summarize all results (HTTP ${followUpResponse.status}). Here's what I gathered:`;
+          } else {
+            followUpData = await followUpResponse.json();
+            console.log('[AIService] Follow-up call to Claude SUCCEEDED. Response data:', JSON.stringify(followUpData, null, 2));
+            if (followUpData.content && Array.isArray(followUpData.content) && followUpData.content.length > 0) {
+                const textContent = followUpData.content.find((c: any) => c.type === 'text');
+                if (textContent) {
+                    aiFinalText = textContent.text;
+                } else if (allFetchedProperties.length > 0) {
+                    aiFinalText = `I've processed the search results from multiple sources. Found ${allFetchedProperties.length} properties.`;
+                } else {
+                    aiFinalText = "I've completed the search, but it seems no properties matched all your criteria across the platforms I checked.";
+                }
+            } else if (allFetchedProperties.length > 0) {
+                 aiFinalText = `I have gathered ${allFetchedProperties.length} properties based on your query.`;
+            }
+          }
+        } catch (error: any) {
+            clearTimeout(followUpTimeoutId);
+            if (error.name === 'AbortError') {
+              console.error('[AIService] Follow-up call to Claude TIMED OUT after 60 seconds.');
+              aiFinalText = "I've gathered the property data, but summarizing it took too long. Here are the properties I found:";
+            } else {
+              console.error('[AIService] Follow-up call to Claude THREW AN EXCEPTION:', error);
+              aiFinalText = `I found some properties, but encountered an exception when trying to summarize the results: ${error.message}. Here's what I gathered:`;
+            }
         }
+        
+        // ADD THIS LOG:
+        console.log('[AIService] Final properties being sent to ChatInterface:', allFetchedProperties);
+        console.log(`[AIService] Total properties from all tools: ${allFetchedProperties.length}`);
 
-        const followUpData = await followUpResponse.json();
-        
-        const aiFinalText = followUpData.content?.[0]?.text || "I've processed the search results.";
-        
+        const finalState = this.parseConversationForCriteria(claudeMessages, aiFinalText, currentState);
+
         return {
           response: aiFinalText,
-          newState: {
-            ...currentState,
-            stage: 'presenting',
-            criteria: { ...currentState.criteria, isComplete: fetchedProperties ? fetchedProperties.length > 0 : false }
-          },
-          properties: fetchedProperties // Return the properties
+          newState: finalState,
+          properties: allFetchedProperties // Return all aggregated properties
         };
+
       } else {
-        console.warn('Claude indicated tool_use, but no tool_use content block was found or it was not search_properties_via_mcp.');
-        // Fallback or handle as an error - for now, let it proceed to regular response
+        console.warn('Claude indicated tool_use, but no tool_use content blocks were found.');
+        // Fallback to treating as a regular text response if no tool_use blocks
       }
     }
 
-    // Regular text response from Claude
-    const responseText = claudeResponse.content?.[0]?.text || 'I apologize, but I had trouble processing that request.';
+    // Regular text response from Claude (or if tool_use parsing failed to proceed)
+    const responseText = claudeResponse.content?.find((c: any) => c.type === 'text')?.text || 'I apologize, but I had trouble processing that request.';
     const newState = this.parseConversationForCriteria(claudeMessages, responseText, currentState);
     
     return {
       response: responseText,
       newState,
-      properties: fetchedProperties // Could be undefined if no tool use
+      properties: allFetchedProperties // Could be empty if no tool use or tools failed
     };
   }
 
   private async executeMCPPropertySearch(toolName: string, toolInput: any) {
     console.log(`🚀 Executing MCP property search via backend for tool: ${toolName}`);
     
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes timeout
+
     try {
       const response = await fetch(`${this.baseUrl}/api/properties/mcp-search`, {
         method: 'POST',
@@ -220,8 +395,11 @@ export class AIService {
         body: JSON.stringify({
           toolName: toolName,    // Send the actual tool name provided by Claude
           toolInput: toolInput   // Send the actual tool input provided by Claude
-        })
+        }),
+        signal: controller.signal
       });
+
+      clearTimeout(timeoutId); // Clear the timeout if the fetch completes
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -251,7 +429,18 @@ export class AIService {
                  [toolName] 
       };
       
-    } catch (error) {
+    } catch (error: any) {
+      clearTimeout(timeoutId); // Clear the timeout in case of other errors
+      if (error.name === 'AbortError') {
+        console.error(`❌ MCP property search for tool ${toolName} timed out after 2 minutes.`);
+        return {
+          success: false,
+          error: 'Tool execution timed out.',
+          properties: [],
+          count: 0,
+          message: `Tool ${toolName} took too long to respond and was timed out.`
+        };
+      }
       console.error(`❌ MCP property search error for tool ${toolName}:`, error);
       // Return a more structured error for the tool_result content block
       return {
@@ -265,38 +454,57 @@ export class AIService {
   }
 
   private buildSystemPromptWithMCP(state: ConversationState): string {
-    return `You are an AI property rental assistant with access to powerful web scraping tools through the user's dedicated Apify MCP integration.
+    let prompt = `You are an AI property rental assistant with access to web scraping tools via Apify MCP.
+Your goal is to gather property details based on user input and then use the available tools to find matching listings.
 
-Your available tools for property searching are:
-- epctex-slash-redfin-scraper: For searching Redfin. Uses parameters: location, maxPrice, bedrooms, propertyType, query.
-- jupri-slash-zillow-scraper: For searching Zillow. This tool ONLY accepts 'prompt', 'search_type', and optionally 'limit'.
-    - For the 'prompt' parameter, you MUST create a single, comprehensive, natural language string that includes ALL user requirements: location, price limits, number of bedrooms, property type, and any other keywords (e.g., "2 bedroom apartments for rent in San Francisco under $3500 with parking").
-    - The 'search_type' parameter MUST ALWAYS be "rent".
-    - Do NOT attempt to send other parameters like 'location', 'max_price', 'bedrooms', or 'category' directly to this Zillow tool; put all search details into the 'prompt' string.
-- ivanvs-slash-craigslist-scraper: For searching Craigslist. Uses parameters: location, query, maxPrice, bedrooms.
-
-Your capabilities:
-- Intelligently choose ONE tool per search attempt.
-- CRITICAL FOR ZILLOW ('jupri-slash-zillow-scraper'): Construct a detailed 'prompt' string. Set 'search_type' to "rent". Use 'limit' if needed. DO NOT use other parameters.
-- Ask clarifying questions to gather all necessary details (location, budget, bedrooms, property type, amenities) BEFORE attempting a search.
-- If a search with one tool fails or yields poor results, you can try a different tool or suggest refining the criteria.
+Conversation Stages:
+- greeting: Initial welcome.
+- gathering: Ask questions to get location, budget, bedrooms, etc.
+- confirming: Summarize criteria and ask user for confirmation before searching.
+- searching: Indicate you are now searching for properties using your tools.
+- presenting: Show the results or state if none were found.
 
 Current conversation stage: ${state.stage}
-User requirements for next search:
-${state.criteria.location ? `- Location: ${state.criteria.location}` : ''}
-${state.criteria.maxPrice ? `- Max budget: $${state.criteria.maxPrice}/month` : ''}
-${state.criteria.bedrooms !== undefined ? `- Bedrooms: ${state.criteria.bedrooms}` : ''}
-${state.criteria.propertyType ? `- Property type: ${state.criteria.propertyType}` : ''}
-${state.criteria.amenities?.length ? `- Desired amenities: ${state.criteria.amenities.join(', ')}` : ''}
-${state.criteria.petFriendly !== undefined ? `- Pet-friendly: ${state.criteria.petFriendly}` : ''}
+Collected criteria: ${JSON.stringify(state.criteria, null, 2)}
+Missing information: ${state.missingInfo.join(', ') || 'None'}
+`;
 
-Guidelines:
-1. Confirm all key details (location, budget, bedrooms) before using a tool.
-2. For Zillow: Create a detailed 'prompt' (e.g., "pet-friendly 1 bedroom houses for rent in downtown Austin, TX under $2500 with a balcony") and set 'search_type' to "rent".
-3. Present search results clearly, mentioning the source.
-4. If a tool call fails, inform the user and you can try an alternative tool if appropriate, or ask the user to rephrase their request.
+    prompt += `
+Your available tools for property searching are:
+- jupri_zillow_scraper: For searching Zillow. This tool PRIMARILY uses a 'prompt' string. Construct a detailed natural language prompt encompassing all known user criteria (location, price, bedrooms, property type, keywords like 'pet-friendly', 'parking'). It also requires 'search_type': 'rent'. Optionally, it can take 'limit' (e.g., 15-20) to control the number of results. Example input: { "prompt": "2 bedroom apartments in San Francisco under $3000 with parking", "search_type": "rent", "limit": 15 }.
+- epctex_apartments_scraper: Searches Apartments.com. Requires a 'proxy': { "useApifyProxy": true }. Provide EITHER a general 'search' string (e.g., "Austin, TX" or "90210") OR specific 'startUrls' (Apartments.com links). 'maxItems' can limit results. Example for general search: { "search": "Austin, TX", "maxItems": 20, "proxy": { "useApifyProxy": true } }.
+- epctex_realtor_scraper: Searches Realtor.com. Requires a 'proxy': { "useApifyProxy": true }. For rentals, use 'mode': 'RENT' along with a general 'search' keyword (city, zip like "Miami, FL"). Alternatively, use 'startUrls' for specific Realtor.com links. 'maxItems' can limit results. Example for general rental search: { "search": "Miami, FL", "mode": "RENT", "maxItems": 20, "proxy": { "useApifyProxy": true } }.
+- epctex_apartmentlist_scraper: Searches ApartmentList.com. Requires 'proxy': { "useApifyProxy": true } and 'startUrls'. For a general search, construct a search URL for ApartmentList.com (e.g., for San Francisco, CA, a URL like 'https://www.apartmentlist.com/ca/san-francisco'). You can provide one or more such URLs. Use 'maxItems' to limit results and 'endPage' to control pagination. Example: { "startUrls": ["https://www.apartmentlist.com/ca/san-francisco"], "maxItems": 15, "proxy": { "useApifyProxy": true } }.",
+`;
 
-Example Zillow tool input: { "prompt": "studio apartments for rent in Chicago near Lincoln Park under $1800", "search_type": "rent", "limit": 15 }`;
+    prompt += `
+
+Tool Usage Guidelines:
+- When you have enough information (at least location and an idea of budget or bedroom count), transition to the 'searching' stage.
+- Based on the user query and collected criteria, decide which tools are most appropriate. For general location-based searches, you **must** use all of the following tools in parallel to ensure comprehensive results: jupri_zillow_scraper, epctex_apartments_scraper, epctex_realtor_scraper, and epctex_apartmentlist_scraper.
+- For Zillow (jupri_zillow_scraper), craft a good 'prompt'.
+- For Apartments.com (epctex_apartments_scraper), ensure 'proxy' is set. Provide a 'search' term for general queries or specific 'startUrls'.
+- For Realtor.com (epctex_realtor_scraper), ensure 'proxy' is set. Use 'search' and 'mode': 'RENT' for general rental searches, or specific 'startUrls'.
+- For ApartmentList.com (epctex_apartmentlist_scraper), ensure 'proxy' is set and provide 'startUrls'. Remember, for general city/area searches, you need to construct the appropriate search URL for ApartmentList.com itself (e.g., 'https://www.apartmentlist.com/STATE_ABBREVIATION/CITY_NAME').
+`;
+
+    prompt += `
+After tool execution, you will receive a summary of results (or errors). Inform the user of what was found or if there were issues.
+If properties are found, they will be displayed separately. Your textual response should summarize the search outcome.
+Address the user directly. Be conversational and helpful.
+Only ask for missing information if it's critical for the current stage or for a tool call.
+If the user provides explicit criteria, use them. Otherwise, you can make reasonable inferences if necessary, but state them.
+If a search yields no results, inform the user and perhaps suggest broadening their criteria.
+Do not ask for confirmation again if you are already in the 'searching' or 'presenting' stage unless the user provides new information that changes the search.`;
+
+    prompt += `
+- For Zillow, craft a good 'prompt'.
+- For Apartments.com (epctex_apartments_scraper), ensure 'proxy' is set. Provide 'search' for general queries or 'startUrls' for specific links.
+- For Realtor.com (epctex_realtor_scraper), ensure 'proxy' is set. Use 'search' and 'mode': 'RENT' for general rental searches, or 'startUrls' for specific links.
+- For ApartmentList.com (epctex_apartmentlist_scraper), ensure 'proxy' is set and provide 'startUrls'.
+`;
+
+    return prompt;
   }
 
   private parseConversationForCriteria(messages: any[], aiResponse: string, currentState: ConversationState): ConversationState {
